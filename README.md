@@ -1,5 +1,18 @@
 # FamPay Auto-Pay
 
+<p align="center">
+  <img src="https://komarev.com/ghpvc/?username=dev-shubh-madara-fampay-autopay&label=Repo%20views&color=7c5cff&style=for-the-badge" alt="Repo views">
+  <a href="https://github.com/dev-shubh-madara/fampay-autopay/stargazers"><img src="https://img.shields.io/github/stars/dev-shubh-madara/fampay-autopay?style=for-the-badge&color=f5c518&logo=github" alt="Stars"></a>
+  <a href="https://github.com/dev-shubh-madara/fampay-autopay/network/members"><img src="https://img.shields.io/github/forks/dev-shubh-madara/fampay-autopay?style=for-the-badge&color=22c55e&logo=github" alt="Forks"></a>
+  <a href="https://github.com/dev-shubh-madara/fampay-autopay/watchers"><img src="https://img.shields.io/github/watchers/dev-shubh-madara/fampay-autopay?style=for-the-badge&color=0ea5e9&logo=github" alt="Watchers"></a>
+</p>
+<p align="center">
+  <a href="https://github.com/dev-shubh-madara/fampay-autopay/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/dev-shubh-madara/fampay-autopay/tests.yml?branch=main&label=tests&style=flat-square" alt="Tests"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license"></a>
+  <a href="SECURITY.md"><img src="https://img.shields.io/badge/security-policy-success?style=flat-square&logo=shieldsdotio" alt="Security policy"></a>
+</p>
+
 **Self-hosted, zero-fee UPI payment verification for your website – using your own FamPay account.**
 
 No payment gateway, no KYC paperwork, no 2% cut. Buyers pay your FamPay UPI ID from any UPI app,
