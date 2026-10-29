@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checkout</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root { --bg:#0b0d12; --card:#141821; --line:#232a36; --text:#e8ecf3; --muted:#8b95a7; --accent:#7c5cff; --ok:#22c55e; --bad:#ef4444; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text);
+         font:15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding:16px; }
+  .card { width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px; }
+  h1 { font-size:20px; margin:0 0 4px; } .muted { color:var(--muted); font-size:13px; }
+  .products { display:grid; gap:10px; margin:18px 0; }
+  .product { display:flex; justify-content:space-between; align-items:center; padding:14px 16px; border:1px solid var(--line);
+             border-radius:12px; cursor:pointer; background:transparent; color:inherit; font:inherit; text-align:left; }
+  .product:hover, .product.sel { border-color:var(--accent); }
+  .amount { font-size:32px; font-weight:700; margin:12px 0 2px; }
+  #qr { background:#fff; padding:12px; border-radius:12px; width:fit-content; margin:16px auto; }
+  .upi { display:flex; gap:8px; align-items:center; justify-content:center; font-family:ui-monospace, monospace; }
+  button.main, a.main { display:block; width:100%; text-align:center; padding:13px; border:0; border-radius:12px; background:var(--accent);
+             color:#fff; font:600 15px system-ui; cursor:pointer; text-decoration:none; margin-top:12px; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); padding:4px 10px; border-radius:8px; cursor:pointer; }
+  input { width:100%; padding:13px; border-radius:12px; border:1px solid var(--line); background:#0f1219; color:var(--text);
+          font:16px ui-monospace, monospace; letter-spacing:1px; margin-top:14px; }
+  .msg { margin-top:12px; font-size:14px; min-height:20px; } .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .done { text-align:center; padding:24px 0; } .done .tick { font-size:56px; }
+  .hidden { display:none; } .center { text-align:center; }
+</style>
+</head>
+<body>
+<main class="card">
+  <!-- Step 1: choose -->
+  <section id="step-choose">
+    <h1>Choose a plan</h1>
+    <div class="muted">Pay with any UPI app. Confirmed automatically.</div>
+    <div class="products" id="products"></div>
+    <button class="main" id="btn-create" disabled>Continue</button>
+  </section>
+
+  <!-- Step 2: pay + UTR -->
+  <section id="step-pay" class="hidden">
+    <div class="center">
+      <div class="muted" id="desc"></div>
+      <div class="amount" id="amount"></div>
+      <div class="muted">Pay this exact amount</div>
+      <div id="qr"></div>
+      <div class="upi"><span id="upi"></span><button class="ghost" id="copy">Copy</button></div>
+    </div>
+    <a class="main" id="paylink" href="#">Open UPI app</a>
+    <input id="utr" inputmode="numeric" maxlength="14" placeholder="12-digit UTR / UPI Ref No.">
+    <button class="main" id="btn-claim">I have paid – verify</button>
+    <div class="msg" id="msg"></div>
+    <div class="muted" style="margin-top:10px">Find the UTR in your UPI app → transaction details → "UPI Ref No." / "UTR".</div>
+  </section>
+
+  <!-- Step 3: done -->
+  <section id="step-done" class="hidden done">
+    <div class="tick">✅</div>
+    <h1>Payment confirmed</h1>
+    <div class="muted" id="done-info"></div>
+  </section>
+</main>
+
+<script>
+// Same origin by default. If you host this page elsewhere set: window.FAMPAY_API = "https://pay.yourdomain.com"
+const API = (window.FAMPAY_API || location.origin).replace(/\/$/, "");
+const $ = (id) => document.getElementById(id);
+let selected = new URLSearchParams(location.search).get("product");
+let order = null, pollTimer = null;
+
+async function api(path, opts = {}) {
+  const r = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.message || ("HTTP " + r.status));
+  return data;
+}
+
+async function loadProducts() {
+  const { products } = await api("/api/products");
+  const box = $("products");
+  products.forEach((p) => {
+    const b = document.createElement("button");
+    b.className = "product" + (p.id === selected ? " sel" : "");
+    b.innerHTML = `<span>${p.title}</span><b>₹${p.amount_inr}</b>`;
+    b.onclick = () => { selected = p.id; [...box.children].forEach((c) => c.classList.remove("sel")); b.classList.add("sel"); $("btn-create").disabled = false; };
+    box.appendChild(b);
+  });
+  $("btn-create").disabled = !selected;
+}
+
+function showPay(o) {
+  order = o;
+  sessionStorage.setItem("fampay_order", o.order_id);
+  $("step-choose").classList.add("hidden");
+  $("step-pay").classList.remove("hidden");
+  $("desc").textContent = o.description || "";
+  $("amount").textContent = "₹" + o.amount_inr;
+  $("upi").textContent = o.pay.upi_id || "UPI ID not set";
+  $("paylink").href = o.pay.upi_link || "#";
+  $("qr").innerHTML = "";
+  if (o.pay.upi_link) new QRCode($("qr"), { text: o.pay.upi_link, width: 200, height: 200 });
+}
+
+function showDone(o) {
+  clearInterval(pollTimer);
+  sessionStorage.removeItem("fampay_order");
+  $("step-pay").classList.add("hidden");
+  $("step-choose").classList.add("hidden");
+  $("step-done").classList.remove("hidden");
+  $("done-info").textContent = `Order ${o.code} · ₹${o.amount_inr}`;
+}
+
+function setMsg(text, cls = "") { $("msg").className = "msg " + cls; $("msg").textContent = text; }
+
+function startPolling() {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const o = await api("/api/orders/" + order.order_id);
+      if (o.status === "paid") showDone(o);
+      else if (o.status === "expired") { clearInterval(pollTimer); setMsg("Order expired. Reload to start again.", "bad"); }
+    } catch (e) {}
+  }, 4000);
+}
+
+$("btn-create").onclick = async () => {
+  $("btn-create").disabled = true;
+  try { showPay(await api("/api/orders", { method: "POST", body: JSON.stringify({ product: selected }) })); }
+  catch (e) { alert(e.message); $("btn-create").disabled = false; }
+};
+
+$("btn-claim").onclick = async () => {
+  const utr = $("utr").value.replace(/\s+/g, "");
+  if (!/^\d{12}$/.test(utr)) return setMsg("Enter the 12-digit UTR number.", "bad");
+  $("btn-claim").disabled = true; setMsg("Checking…");
+  try {
+    const o = await api(`/api/orders/${order.order_id}/claim`, { method: "POST", body: JSON.stringify({ utr }) });
+    if (o.status === "paid") return showDone(o);
+    setMsg(o.message || "UTR saved. Waiting for the payment confirmation…", "ok");
+    startPolling();
+  } catch (e) { setMsg(e.message, "bad"); }
+  finally { $("btn-claim").disabled = false; }
+};
+
+$("copy").onclick = () => navigator.clipboard?.writeText($("upi").textContent);
+
+(async () => {
+  const saved = sessionStorage.getItem("fampay_order");
+  if (saved) {
+    try {
+      const o = await api("/api/orders/" + saved);
+      if (o.status === "paid") return showDone(o);
+      if (o.status === "pending") { showPay(o); if (o.pay.utr_submitted) startPolling(); return; }
+    } catch (e) {}
+  }
+  loadProducts().catch((e) => alert("Cannot reach payment server: " + e.message));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!--
+  Drop-in payment box for ANY website (plain HTML/JS, works in React/Vue too).
+  Change FAMPAY_API to where your backend runs, and PRODUCT to one of your PRODUCTS ids.
+  If you create orders from your own backend instead, skip createOrder() and pass
+  the order you got back to showPay().
+-->
+<div id="fampay-box" style="max-width:360px;font-family:system-ui;padding:16px;border:1px solid #ddd;border-radius:12px">
+  <button id="fp-buy">Buy Pro – ₹79</button>
+  <div id="fp-pay" style="display:none">
+    <p>Pay <b id="fp-amt"></b> to <b id="fp-upi"></b></p>
+    <div id="fp-qr"></div>
+    <p><a id="fp-link" href="#">Open UPI app</a></p>
+    <input id="fp-utr" placeholder="12-digit UTR" inputmode="numeric" maxlength="14">
+    <button id="fp-claim">Verify payment</button>
+    <p id="fp-msg"></p>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+  const FAMPAY_API = "https://pay.yourdomain.com"; // ← your backend URL
+  const PRODUCT = "pro";
+  let order;
+
+  async function call(path, body) {
+    const r = await fetch(FAMPAY_API + path, {
+      method: body ? "POST" : "GET",
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.message);
+    return data;
+  }
+
+  function showPay(o) {
+    order = o;
+    document.getElementById("fp-buy").style.display = "none";
+    document.getElementById("fp-pay").style.display = "block";
+    document.getElementById("fp-amt").textContent = "₹" + o.amount_inr;
+    document.getElementById("fp-upi").textContent = o.pay.upi_id;
+    document.getElementById("fp-link").href = o.pay.upi_link;
+    new QRCode(document.getElementById("fp-qr"), { text: o.pay.upi_link, width: 180, height: 180 });
+  }
+
+  function paid() {
+    document.getElementById("fp-msg").textContent = "✅ Payment confirmed!";
+    // → redirect, unlock content, etc. (also trust your webhook, not just the browser)
+  }
+
+  document.getElementById("fp-buy").onclick = async () => showPay(await call("/api/orders", { product: PRODUCT }));
+
+  document.getElementById("fp-claim").onclick = async () => {
+    const msg = document.getElementById("fp-msg");
+    try {
+      const o = await call(`/api/orders/${order.order_id}/claim`, { utr: document.getElementById("fp-utr").value });
+      if (o.status === "paid") return paid();
+      msg.textContent = "Checking… this usually takes under a minute.";
+      const t = setInterval(async () => {
+        const s = await call(`/api/orders/${order.order_id}`);
+        if (s.status === "paid") { clearInterval(t); paid(); }
+      }, 4000);
+    } catch (e) { msg.textContent = e.message; }
+  };
+</script>
