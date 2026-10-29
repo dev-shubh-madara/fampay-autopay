@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Checkout</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
   :root { --bg:#0b0d12; --card:#141821; --line:#232a36; --text:#e8ecf3; --muted:#8b95a7; --accent:#7c5cff; --ok:#22c55e; --bad:#ef4444; }
   * { box-sizing: border-box; }
@@ -17,7 +16,7 @@
              border-radius:12px; cursor:pointer; background:transparent; color:inherit; font:inherit; text-align:left; }
   .product:hover, .product.sel { border-color:var(--accent); }
   .amount { font-size:32px; font-weight:700; margin:12px 0 2px; }
-  #qr { background:#fff; padding:12px; border-radius:12px; width:fit-content; margin:16px auto; }
+  #qr { background:#fff; padding:8px; border-radius:12px; width:216px; height:216px; margin:16px auto; display:block; }
   .upi { display:flex; gap:8px; align-items:center; justify-content:center; font-family:ui-monospace, monospace; }
   button.main, a.main { display:block; width:100%; text-align:center; padding:13px; border:0; border-radius:12px; background:var(--accent);
              color:#fff; font:600 15px system-ui; cursor:pointer; text-decoration:none; margin-top:12px; }
@@ -35,6 +34,7 @@
   <section id="step-choose">
     <h1>Choose a plan</h1>
     <div class="muted">Pay with any UPI app. Confirmed automatically.</div>
+    <div class="muted">🔒 You only share the UTR number. Never your UPI PIN, OTP or card details.</div>
     <div class="products" id="products"></div>
     <button class="main" id="btn-create" disabled>Continue</button>
   </section>
@@ -45,7 +45,7 @@
       <div class="muted" id="desc"></div>
       <div class="amount" id="amount"></div>
       <div class="muted">Pay this exact amount</div>
-      <div id="qr"></div>
+      <img id="qr" alt="UPI QR code" width="216" height="216">
       <div class="upi"><span id="upi"></span><button class="ghost" id="copy">Copy</button></div>
     </div>
     <a class="main" id="paylink" href="#">Open UPI app</a>
@@ -63,100 +63,6 @@
   </section>
 </main>
 
-<script>
-// Same origin by default. If you host this page elsewhere set: window.FAMPAY_API = "https://pay.yourdomain.com"
-const API = (window.FAMPAY_API || location.origin).replace(/\/$/, "");
-const $ = (id) => document.getElementById(id);
-let selected = new URLSearchParams(location.search).get("product");
-let order = null, pollTimer = null;
-
-async function api(path, opts = {}) {
-  const r = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...opts });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.message || ("HTTP " + r.status));
-  return data;
-}
-
-async function loadProducts() {
-  const { products } = await api("/api/products");
-  const box = $("products");
-  products.forEach((p) => {
-    const b = document.createElement("button");
-    b.className = "product" + (p.id === selected ? " sel" : "");
-    b.innerHTML = `<span>${p.title}</span><b>₹${p.amount_inr}</b>`;
-    b.onclick = () => { selected = p.id; [...box.children].forEach((c) => c.classList.remove("sel")); b.classList.add("sel"); $("btn-create").disabled = false; };
-    box.appendChild(b);
-  });
-  $("btn-create").disabled = !selected;
-}
-
-function showPay(o) {
-  order = o;
-  sessionStorage.setItem("fampay_order", o.order_id);
-  $("step-choose").classList.add("hidden");
-  $("step-pay").classList.remove("hidden");
-  $("desc").textContent = o.description || "";
-  $("amount").textContent = "₹" + o.amount_inr;
-  $("upi").textContent = o.pay.upi_id || "UPI ID not set";
-  $("paylink").href = o.pay.upi_link || "#";
-  $("qr").innerHTML = "";
-  if (o.pay.upi_link) new QRCode($("qr"), { text: o.pay.upi_link, width: 200, height: 200 });
-}
-
-function showDone(o) {
-  clearInterval(pollTimer);
-  sessionStorage.removeItem("fampay_order");
-  $("step-pay").classList.add("hidden");
-  $("step-choose").classList.add("hidden");
-  $("step-done").classList.remove("hidden");
-  $("done-info").textContent = `Order ${o.code} · ₹${o.amount_inr}`;
-}
-
-function setMsg(text, cls = "") { $("msg").className = "msg " + cls; $("msg").textContent = text; }
-
-function startPolling() {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
-    try {
-      const o = await api("/api/orders/" + order.order_id);
-      if (o.status === "paid") showDone(o);
-      else if (o.status === "expired") { clearInterval(pollTimer); setMsg("Order expired. Reload to start again.", "bad"); }
-    } catch (e) {}
-  }, 4000);
-}
-
-$("btn-create").onclick = async () => {
-  $("btn-create").disabled = true;
-  try { showPay(await api("/api/orders", { method: "POST", body: JSON.stringify({ product: selected }) })); }
-  catch (e) { alert(e.message); $("btn-create").disabled = false; }
-};
-
-$("btn-claim").onclick = async () => {
-  const utr = $("utr").value.replace(/\s+/g, "");
-  if (!/^\d{12}$/.test(utr)) return setMsg("Enter the 12-digit UTR number.", "bad");
-  $("btn-claim").disabled = true; setMsg("Checking…");
-  try {
-    const o = await api(`/api/orders/${order.order_id}/claim`, { method: "POST", body: JSON.stringify({ utr }) });
-    if (o.status === "paid") return showDone(o);
-    setMsg(o.message || "UTR saved. Waiting for the payment confirmation…", "ok");
-    startPolling();
-  } catch (e) { setMsg(e.message, "bad"); }
-  finally { $("btn-claim").disabled = false; }
-};
-
-$("copy").onclick = () => navigator.clipboard?.writeText($("upi").textContent);
-
-(async () => {
-  const saved = sessionStorage.getItem("fampay_order");
-  if (saved) {
-    try {
-      const o = await api("/api/orders/" + saved);
-      if (o.status === "paid") return showDone(o);
-      if (o.status === "pending") { showPay(o); if (o.pay.utr_submitted) startPolling(); return; }
-    } catch (e) {}
-  }
-  loadProducts().catch((e) => alert("Cannot reach payment server: " + e.message));
-})();
-</script>
+<script src="/checkout.js"></script>
 </body>
 </html>

@@ -6,6 +6,7 @@ from email.message import EmailMessage
 from email.utils import format_datetime
 
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp())  # module-level app must not touch ./data
+os.environ["FAMPAY_NO_APP"] = "1"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,16 +15,18 @@ from app.config import Settings
 from app.db import Database
 from app.main import create_app
 
-ADMIN = {"Authorization": "Bearer test-admin"}
-SECRET = {"X-Api-Secret": "test-secret"}
+ADMIN_TOKEN = "adm_Q8v2kL9xZp4Rt7Wm3Nc6Yb1H"
+API_SECRET = "sec_J5s8Df2Gh7Kl0Pq3Rv6Xz9Ab"
+ADMIN = {"Authorization": "Bearer " + ADMIN_TOKEN}
+SECRET = {"X-Api-Secret": API_SECRET}
 
 
 def make_settings(tmp_path, **over) -> Settings:
     base = dict(
         _env_file=None,
         data_dir=str(tmp_path),
-        api_secret="test-secret",
-        admin_token="test-admin",
+        api_secret=API_SECRET,
+        admin_token=ADMIN_TOKEN,
         upi_id="shop@fam",
         payee_name="Test Shop",
         products="basic:29:Basic plan,pro:79:Pro plan",

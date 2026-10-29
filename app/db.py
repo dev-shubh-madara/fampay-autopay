@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS orders (
     amount_paise  INTEGER NOT NULL,
     status        TEXT NOT NULL,          -- pending | paid | cancelled
     claimed_utr   TEXT,
+    claim_attempts INTEGER NOT NULL DEFAULT 0,
     payment_id    INTEGER,
     metadata      TEXT,
     created_at    INTEGER NOT NULL,
@@ -58,7 +59,10 @@ CREATE TABLE IF NOT EXISTS kv (
 class Database:
     def __init__(self, path: str):
         if path != ":memory:":
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            folder = os.path.dirname(os.path.abspath(path))
+            os.makedirs(folder, mode=0o700, exist_ok=True)
+            if not os.path.exists(path):  # create the DB readable by the owner only
+                os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -66,6 +70,9 @@ class Database:
         self._lock = threading.RLock()
         with self._lock:
             self._conn.executescript(SCHEMA)
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(orders)")}
+            if "claim_attempts" not in cols:  # upgrade older databases
+                self._conn.execute("ALTER TABLE orders ADD COLUMN claim_attempts INTEGER NOT NULL DEFAULT 0")
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock:

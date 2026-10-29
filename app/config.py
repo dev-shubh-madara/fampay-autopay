@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     data_dir: str = "data"  # SQLite file lives here. Mount a volume on cloud hosts.
     cors_origins: str = "*"  # your website origin(s), e.g. https://shop.example.com
     expose_docs: bool = True  # /docs (Swagger UI)
+    # Only believe CF-Connecting-IP / X-Forwarded-For when you really run behind
+    # Cloudflare or a platform proxy. Otherwise clients could fake their IP to
+    # dodge rate limits.
+    trust_proxy_headers: bool = False
+    # Refuse to start with missing/weak secrets. Only set false for local testing.
+    strict_secrets: bool = True
+    max_body_bytes: int = 64 * 1024  # request size cap (admin parse-email gets 2 MB)
 
     # ── Secrets ───────────────────────────────────────────────────────────
     # Your website's BACKEND sends this as  X-Api-Secret  to create orders
@@ -38,6 +45,13 @@ class Settings(BaseSettings):
     order_grace_minutes: int = 360  # payment e-mails can arrive late
     order_prefix: str = "PAY"  # prefix of the short order code shown to the buyer
     max_pending_per_customer: int = 5
+    max_claims_per_order: int = 6  # wrong-UTR attempts before an order is locked
+    # A payment must arrive after the order was created (minus this tolerance),
+    # so an old unrelated receipt can't be re-used for a new order.
+    payment_before_order_tolerance_minutes: int = 30
+    min_amount_inr: float = 1
+    max_amount_inr: float = 100000
+    purge_unpaid_after_days: int = 30  # delete old unpaid orders (paid ones and used UTRs are kept forever)
 
     # ── Webhook to your website when an order is paid ─────────────────────
     webhook_url: str = ""  # e.g. https://shop.example.com/api/fampay-webhook
@@ -61,6 +75,32 @@ class Settings(BaseSettings):
     payment_in_keywords: str = "received,credited,paid you,sent you,money in,payment from,deposit"
     payment_out_keywords: str = "debited,you paid,you sent,paid to,sent to,payment to,refund,failed,declined,reversed"
     utr_pattern: str = r"[0-9]{12}"  # shape of a UPI reference (UTR) number
+
+    def security_problems(self) -> list[str]:
+        """Things that make a deployment unsafe. Empty list = OK."""
+        bad: list[str] = []
+
+        def weak(v: str) -> bool:
+            return len(v) < 24 or "change-me" in v.lower() or len(set(v)) < 8
+
+        if self.api_secret and weak(self.api_secret):
+            bad.append("API_SECRET is too weak (use 24+ random characters)")
+        if self.admin_token and weak(self.admin_token):
+            bad.append("ADMIN_TOKEN is too weak (use 24+ random characters)")
+        if self.api_secret and self.admin_token and self.api_secret == self.admin_token:
+            bad.append("API_SECRET and ADMIN_TOKEN must be different")
+        if self.webhook_url:
+            if not self.webhook_secret or weak(self.webhook_secret):
+                bad.append("WEBHOOK_URL is set but WEBHOOK_SECRET is missing or weak")
+            if not (self.webhook_url.startswith("https://") or self.webhook_url.startswith(("http://localhost", "http://127.0.0.1"))):
+                bad.append("WEBHOOK_URL must use https://")
+        if self.imap_enabled and not self.require_email_auth:
+            bad.append("REQUIRE_EMAIL_AUTH=false lets anyone fake a payment e-mail")
+        if self.imap_enabled and not (self.imap_user and self.imap_password):
+            bad.append("IMAP_ENABLED=true but IMAP_USER / IMAP_PASSWORD are missing")
+        if self.upi_id and "@" not in self.upi_id:
+            bad.append("UPI_ID does not look like a UPI ID (name@bank)")
+        return bad
 
     @property
     def cors_origin_list(self) -> list[str]:

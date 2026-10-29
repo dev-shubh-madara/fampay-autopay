@@ -17,16 +17,27 @@ type their **UTR**, and this backend confirms the payment automatically by readi
             order = PAID ──▶ signed webhook to your site
 ```
 
+## 🔒 Built to be trusted
+
+- Money goes **straight from the buyer's UPI app to your UPI ID**. This code can't move, refund
+  or touch money, and never sees a UPI PIN, OTP, card or bank login.
+- Read-only mailbox, TLS-verified login, no telemetry, **zero third-party scripts**.
+- Refuses to start with weak secrets or unsafe settings – it fails closed.
+- 30+ security tests. Full threat model and how to report issues: **[SECURITY.md](SECURITY.md)**.
+
 ## Features
 
 - ✅ **Automatic confirmation** – usually under a minute after the buyer submits the UTR
 - 🔒 **One UTR, one use – ever.** Re-using someone else's (or an old) UTR is impossible
+- 🧱 **UTR guessing blocked** – each order locks after a few wrong UTRs, plus rate limits
+- 🕒 **Old receipts rejected** – a payment made before the order existed can't pay for it
 - 🛡️ **Fake e-mail protection** – only trusts mail from FamPay that passes DKIM/DMARC on *your* mail server
 - 💸 **Under-payment detection** – paying ₹1 for a ₹79 order is rejected
 - 📬 **Read-only IMAP** – never marks mail as read, moves or deletes anything
 - 🔁 **Restart-safe** – every e-mail is processed once (UID + Message-ID tracking)
 - 🪝 **Signed webhooks** (HMAC-SHA256) to unlock the purchase on your site
-- 🧾 **Ready checkout page** at `/checkout` with UPI QR + "Open UPI app" button
+- 🧾 **Ready checkout page** at `/checkout` with a self-generated UPI QR + "Open UPI app" button,
+  strict CSP, no external scripts
 - 👮 **Admin API** – list orders/payments, manual approve, test the e-mail parser
 - 🐳 Single small Python service + SQLite. Docker, Railway, Render, Koyeb or your own PC
 
@@ -53,7 +64,7 @@ Make sure FamPay e-mail notifications for received payments are on and arrive in
 ```bash
 git clone <this-repo-url> fampay-autopay
 cd fampay-autopay
-cp .env.example .env        # then edit .env with YOUR values
+cp .env.example .env        # then edit .env with YOUR values (secrets must be strong!)
 pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
@@ -68,7 +79,9 @@ docker compose up -d --build
 Open:
 - `http://localhost:8000/checkout` – working checkout page
 - `http://localhost:8000/docs` – interactive API docs
-- `http://localhost:8000/health` – shows whether IMAP is connected
+- `http://localhost:8000/health` – simple up/down check
+
+If it stops with **"Unsafe configuration"**, it is protecting you: fix the listed `.env` values.
 
 ## 3. Configure (`.env`)
 
@@ -86,6 +99,9 @@ Open:
 | `REQUIRE_EMAIL_AUTH` | `true` | Keep `true` – blocks forged e-mails |
 | `WEBHOOK_URL` / `WEBHOOK_SECRET` | `https://site.com/hook` / random | Notify your site when paid |
 | `CORS_ORIGINS` | `https://site.com` | Your website origin(s) |
+| `TRUST_PROXY_HEADERS` | `false` | `true` only behind Cloudflare / Railway / Render / Koyeb |
+| `MAX_CLAIMS_PER_ORDER` | `6` | Different UTRs allowed per order before it locks |
+| `MIN_AMOUNT_INR` / `MAX_AMOUNT_INR` | `1` / `100000` | Allowed order amounts |
 | `DATA_DIR` | `data` | SQLite location – **mount a volume** on cloud hosts |
 
 Generate secrets: `python -c "import secrets;print(secrets.token_urlsafe(32))"`
@@ -104,7 +120,7 @@ const order = await (await fetch(API + "/api/orders", {
   method: "POST", headers: {"Content-Type": "application/json"},
   body: JSON.stringify({ product: "pro", customer_ref: "user-42" })
 })).json();
-// show order.pay.upi_id, order.amount_inr and a QR of order.pay.upi_link
+// show order.pay.upi_id, order.amount_inr and the QR: <img src={API + `/api/orders/${order.order_id}/qr.svg`}>
 
 // 2. buyer pays, types UTR
 await fetch(`${API}/api/orders/${order.order_id}/claim`, {
@@ -130,17 +146,22 @@ Ready-made examples:
 - **Railway / Render / Koyeb:** deploy from your fork (Dockerfile is detected), add the `.env` values as
   variables, and **attach a volume at `/srv/data`** so orders and used UTRs survive redeploys.
 
-## 6. Security notes
+## 6. Security checklist
 
-- Never commit `.env`. It is already in `.gitignore`.
-- Keep `REQUIRE_EMAIL_AUTH=true`; otherwise anyone could e-mail you a fake "payment received".
-- Use a Gmail used for nothing else if you can – the app password can read that inbox.
-- `API_SECRET` belongs only on servers, never in browser JavaScript.
-- Losing the database means losing the list of used UTRs – back up `data/payments.db`.
+- [ ] Strong, different `API_SECRET`, `ADMIN_TOKEN`, `WEBHOOK_SECRET` (the app enforces this)
+- [ ] `.env` never committed (already in `.gitignore`)
+- [ ] `REQUIRE_EMAIL_AUTH=true` (enforced while IMAP is on)
+- [ ] A dedicated Gmail with 2-Step Verification for the app password
+- [ ] HTTPS in front of the backend, `CORS_ORIGINS` set to your site
+- [ ] `API_SECRET` only on servers – never in browser JavaScript
+- [ ] Purchases unlocked from the webhook / server-side check, not the browser
+- [ ] `data/payments.db` backed up (it holds every used UTR)
+
+Details and the full threat model: [SECURITY.md](SECURITY.md).
 
 ## 7. If a payment isn't detected
 
-1. `GET /health` – is `imap.last_error` empty?
+1. `GET /admin/status` – is `imap.last_error` empty? Any `warnings`?
 2. `GET /admin/emails` – what happened to the e-mail (`ignored_sender`, `rejected_unauthenticated`, `unparsed`…)?
 3. In Gmail open the FamPay mail → ⋮ → **Show original** → copy all → `POST /admin/parse-email` (text/plain).
    It shows the amount/UTR the parser reads. If FamPay changed its wording, adjust

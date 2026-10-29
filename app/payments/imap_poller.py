@@ -10,6 +10,7 @@ Runs in a background thread so it works with any web framework.
 
 import imaplib
 import logging
+import ssl
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -53,7 +54,11 @@ class ImapPoller:
 
     # ── IMAP ──────────────────────────────────────────────────────────────
     def _connect(self):
-        conn = self._factory(self.s.imap_host, self.s.imap_port, timeout=30)
+        # Python's imaplib does NOT verify the server certificate by default.
+        # Always pass a verifying context so nobody can intercept the Gmail login.
+        ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        conn = self._factory(self.s.imap_host, self.s.imap_port, ssl_context=ctx, timeout=30)
         conn.login(self.s.imap_user, self.s.imap_password)
         return conn
 
@@ -145,7 +150,7 @@ class ImapPoller:
 
     # ── background loop ───────────────────────────────────────────────────
     def _run(self) -> None:
-        self.db.execute("DELETE FROM processed_emails WHERE processed_at < ?", (int(time.time()) - 90 * 86400,))
+        self.service.housekeeping()
         delay = self.s.imap_poll_seconds
         log.info("IMAP poller started for %s", self.s.imap_user)
         while not self._stop.is_set():
@@ -155,7 +160,11 @@ class ImapPoller:
                     log.info("processed %d new e-mail(s)", n)
                 delay = self.s.imap_poll_seconds
             except Exception as exc:
-                self.last_error = f"{type(exc).__name__}: {exc}"[:200]
+                # Never echo raw server responses (could contain the login name); type + short text only.
+                text = str(exc)
+                if self.s.imap_password:
+                    text = text.replace(self.s.imap_password, "***")
+                self.last_error = (type(exc).__name__ + ": " + text)[:200]
                 delay = min(max(delay * 2, 30), 300)
                 log.warning("IMAP poll failed (%s); retrying in %ss", self.last_error, delay)
             self._stop.wait(delay)

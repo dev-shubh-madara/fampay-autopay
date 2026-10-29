@@ -19,6 +19,7 @@ import re
 import secrets
 import sqlite3
 import time
+from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
 from ..config import Settings
@@ -63,6 +64,8 @@ class PaymentService:
         return row["status"]
 
     def view(self, row, private: bool = False) -> dict:
+        """Public view = only what the buyer's browser needs. Your customer ids,
+        metadata and the submitted UTR are shown only to your backend/admin."""
         status = self.status_of(row)
         v = {
             "order_id": row["id"],
@@ -71,16 +74,18 @@ class PaymentService:
             "amount_inr": _rupees(row["amount_paise"]),
             "product": row["product"],
             "description": row["description"],
-            "customer_ref": row["customer_ref"],
             "created_at": row["created_at"],
             "expires_at": row["expires_at"],
             "paid_at": row["paid_at"],
         }
-        if row["metadata"]:
-            try:
-                v["metadata"] = json.loads(row["metadata"])
-            except ValueError:
-                v["metadata"] = None
+        if private:
+            v["customer_ref"] = row["customer_ref"]
+            v["metadata"] = None
+            if row["metadata"]:
+                try:
+                    v["metadata"] = json.loads(row["metadata"])
+                except ValueError:
+                    pass
         if status == "pending":
             v["pay"] = {
                 "upi_id": self.s.upi_id or None,
@@ -98,6 +103,19 @@ class PaymentService:
             v["webhook_state"] = row["webhook_state"]
         return v
 
+    def _to_paise(self, amount_inr) -> int:
+        try:
+            d = Decimal(str(amount_inr))
+        except (InvalidOperation, ValueError):
+            raise ApiError(422, "invalid_amount", "Amount must be a number.")
+        if not d.is_finite() or d != d.quantize(Decimal("0.01")):
+            raise ApiError(422, "invalid_amount", "Amount must have at most 2 decimals.")
+        paise = int(d * 100)
+        lo, hi = round(self.s.min_amount_inr * 100), round(self.s.max_amount_inr * 100)
+        if paise < lo or paise > hi:
+            raise ApiError(422, "invalid_amount", f"Amount must be between ₹{lo / 100:g} and ₹{hi / 100:g}.")
+        return paise
+
     # ── orders ────────────────────────────────────────────────────────────
     def _new_code(self) -> str:
         return self.s.order_prefix.upper() + "".join(secrets.choice(CODE_ALPHABET) for _ in range(6))
@@ -113,30 +131,36 @@ class PaymentService:
         trusted: bool = False,
     ) -> dict:
         """trusted=True means the caller sent the correct X-Api-Secret (your backend)."""
+        if not trusted and not self.s.allow_public_orders:
+            raise ApiError(403, "secret_required", "Orders can only be created by the site's backend.")
         products = self.s.product_map
         title = None
         if product:
             product = product.strip().lower()
             if product not in products:
-                raise ApiError(422, "invalid_product", "Unknown product. Valid: " + ", ".join(products) if products else "No products configured.")
+                raise ApiError(422, "invalid_product", "Unknown product.")
             amount_paise, title = products[product]
             if amount_inr is not None and trusted:
-                amount_paise = round(amount_inr * 100)  # backend may override the price
+                amount_paise = self._to_paise(amount_inr)  # backend may override the price
         elif amount_inr is not None:
             if not trusted:
                 raise ApiError(403, "secret_required", "Custom amounts need the X-Api-Secret header (call from your backend).")
-            amount_paise = round(amount_inr * 100)
+            amount_paise = self._to_paise(amount_inr)
         else:
             raise ApiError(422, "missing_amount", "Send either 'product' or 'amount_inr'.")
 
-        if not trusted and not self.s.allow_public_orders:
-            raise ApiError(403, "secret_required", "Orders can only be created by the site's backend.")
-        if amount_paise < 100 or amount_paise > 100_000_00:
-            raise ApiError(422, "invalid_amount", "Amount must be between ₹1 and ₹1,00,000.")
+        if not trusted:
+            # The browser can't be trusted: price comes from PRODUCTS only, and it can't
+            # set ids/metadata (stops strangers filling another user's order slots).
+            customer_ref, metadata, description = None, None, None
 
         customer_ref = (customer_ref or "").strip()[:120] or None
         description = (description or title or "").strip()[:200] or None
-        meta = json.dumps(metadata)[:4000] if metadata else None
+        meta = None
+        if metadata:
+            meta = json.dumps(metadata, separators=(",", ":"))
+            if len(meta) > 4000:
+                raise ApiError(422, "metadata_too_large", "metadata must be under 4 KB of JSON.")
         now = self.now()
 
         with self.db.tx() as t:
@@ -147,7 +171,7 @@ class PaymentService:
                     (customer_ref, amount_paise, product or "", now),
                 ).fetchone()
                 if same:
-                    return self.view(same)  # reuse instead of piling up orders
+                    return self.view(same, private=trusted)  # reuse instead of piling up orders
                 n = t.execute(
                     "SELECT COUNT(*) FROM orders WHERE customer_ref=? AND status='pending' AND expires_at>?",
                     (customer_ref, now),
@@ -170,7 +194,7 @@ class PaymentService:
             else:  # pragma: no cover
                 raise ApiError(500, "order_failed", "Could not create an order, try again.")
             row = t.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-        return self.view(row)
+        return self.view(row, private=trusted)
 
     def get_order(self, order_id: str, private: bool = False) -> dict:
         row = self.db.fetchone("SELECT * FROM orders WHERE id=?", (order_id,))
@@ -253,6 +277,9 @@ class PaymentService:
             if not self._matchable(order):
                 t.execute("UPDATE payments SET order_id=?, note=? WHERE id=?", (order["id"], f"order {self.status_of(order)}", pid))
                 return {"result": "order_not_open", "payment_id": pid, "order_id": order["id"]}
+            if self._older_than_order(received_at, order):
+                t.execute("UPDATE payments SET note=? WHERE id=?", ("paid before the order existed", pid))
+                return {"result": "payment_before_order", "payment_id": pid, "order_id": order["id"]}
             if p.amount_paise < order["amount_paise"]:
                 t.execute(
                     "UPDATE payments SET status='underpaid', order_id=?, note=? WHERE id=?",
@@ -263,6 +290,9 @@ class PaymentService:
             return {"result": "matched", "payment_id": pid, "order_id": order["id"]}
 
     # ── buyer submits the UTR ─────────────────────────────────────────────
+    def _older_than_order(self, received_at: int, order) -> bool:
+        return received_at < order["created_at"] - self.s.payment_before_order_tolerance_minutes * 60
+
     def claim(self, order_id: str, utr: str) -> dict:
         utr = re.sub(r"\s+", "", utr or "")
         if not re.fullmatch(self.s.utr_pattern, utr):
@@ -276,7 +306,20 @@ class PaymentService:
                 return self.view(order)
             if not self._matchable(order):
                 raise ApiError(410, "order_expired", "This order has expired. Create a new one.")
+            if utr == order["claimed_utr"]:
+                payment = t.execute("SELECT * FROM payments WHERE utr=?", (utr,)).fetchone()
+                if payment is None:  # same UTR again, still waiting: no new attempt used
+                    return self.view(order) | {"message": "Still waiting for the payment e-mail."}
+            else:
+                # Every NEW UTR counts as an attempt, so nobody can brute-force UTRs.
+                if order["claim_attempts"] >= self.s.max_claims_per_order:
+                    raise ApiError(423, "order_locked", "Too many UTR attempts on this order. Contact the seller.")
+                t.execute("UPDATE orders SET claim_attempts=claim_attempts+1 WHERE id=?", (order_id,))
 
+        with self.db.tx() as t:
+            order = t.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+            if order["status"] == "paid":
+                return self.view(order)
             # One UTR, one use – ever.
             payment = t.execute("SELECT * FROM payments WHERE utr=?", (utr,)).fetchone()
             if payment is not None:
@@ -284,6 +327,8 @@ class PaymentService:
                     raise ApiError(409, "utr_used", "That payment was already used for an order.")
                 if payment["order_id"] and payment["order_id"] != order_id:
                     raise ApiError(409, "utr_used", "That payment belongs to another order.")
+                if self._older_than_order(payment["received_at"], order):
+                    raise ApiError(409, "payment_before_order", "That payment was made before this order was created. Contact the seller.")
                 if payment["amount_paise"] < order["amount_paise"]:
                     raise ApiError(
                         402, "underpaid",
@@ -313,6 +358,17 @@ class PaymentService:
         if v["status"] == "pending":
             v["message"] = "UTR saved. Your order is confirmed automatically as soon as the payment e-mail arrives (usually under a minute)."
         return v
+
+    # ── maintenance ───────────────────────────────────────────────────────
+    def housekeeping(self) -> None:
+        """Drop old e-mail logs and old UNPAID orders. Paid orders and every
+        UTR ever seen are kept forever – that's what blocks re-use."""
+        now = self.now()
+        self.db.execute("DELETE FROM processed_emails WHERE processed_at < ?", (now - 90 * 86400,))
+        self.db.execute(
+            "DELETE FROM orders WHERE status IN ('pending','cancelled') AND expires_at < ?",
+            (now - self.s.purge_unpaid_after_days * 86400,),
+        )
 
     # ── admin ─────────────────────────────────────────────────────────────
     def admin_approve(self, order_id: str, note: str = "manual approval") -> dict:
